@@ -37,6 +37,13 @@
       image-rendering: pixelated;
     }
 
+    canvas:fullscreen {
+      width: min(100vw, calc(100vh * 160 / 144));
+      height: min(100vh, calc(100vw * 144 / 160));
+      margin: auto;
+      outline: none;
+    }
+
     #controls {
       display: flex;
       flex-wrap: wrap;
@@ -98,7 +105,6 @@
       ["Tab", "_set_joyp_select"]
     ];
 
-    const app = document.getElementById("app");
     const canvas = document.getElementById("screen");
     const context = canvas.getContext("2d");
     const imageData = context.createImageData(canvas.width, canvas.height);
@@ -293,13 +299,19 @@
       }
     });
 
+    const updateFullscreenButton = () => {
+      fullscreenButton.textContent = document.fullscreenElement === canvas ? "Exit Fullscreen" : "Fullscreen";
+    };
+
     fullscreenButton.addEventListener("click", async () => {
-      if (document.fullscreenElement) {
+      if (document.fullscreenElement === canvas) {
         await document.exitFullscreen();
       } else {
-        await app.requestFullscreen();
+        await canvas.requestFullscreen();
       }
     });
+
+    document.addEventListener("fullscreenchange", updateFullscreenButton);
 
     document.querySelectorAll("button[data-scale]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -343,6 +355,7 @@
       state.romBytes = new Uint8Array(await response.arrayBuffer());
       createEmulator();
       setScale(3);
+      updateFullscreenButton();
       state.rafId = requestAnimationFrame(frame);
     })().catch((error) => {
       console.error(error);
