@@ -70,6 +70,27 @@
       margin-top: 10px;
     }
 
+    #gamepad-mode[hidden],
+    #gamepad-map[hidden] {
+      display: none;
+    }
+
+    #gamepad-setup {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      width: min(100%, 720px);
+      width: 100%;
+      color: #ddd;
+    }
+
+    #gamepad-setup[hidden] {
+      display: none;
+    }
+
     #palette-toolbar {
       display: flex;
       justify-content: center;
@@ -190,6 +211,12 @@
       <button type="button" id="fullscreen">Fullscreen</button>
       <button type="button" id="pause">Pause</button>
       <button type="button" id="reset">Reset</button>
+      <button type="button" id="gamepad-mode" hidden>Gamepad: Default</button>
+      <button type="button" id="gamepad-map" hidden>Map Pad</button>
+    </div>
+    <div id="gamepad-setup" hidden>
+      <span id="gamepad-setup-text"></span>
+      <button type="button" id="gamepad-setup-cancel">Cancel</button>
     </div>
     <div id="palette-panel">
       <div id="palette-toolbar">
@@ -211,6 +238,8 @@
     const AUDIO_FRAMES = 4096;
     const AUDIO_LATENCY_SEC = 0.1;
     const GAMEPAD_DEADZONE = 0.5;
+    const GAMEPAD_LEARN_DEADZONE = 0.75;
+    const GAMEPAD_STORAGE_KEY = "webemulator.gamepadMappings.v1";
     const MAX_UPDATE_SEC = 5 / 60;
     const EVENT_NEW_FRAME = 1;
     const EVENT_AUDIO_BUFFER_FULL = 2;
@@ -316,6 +345,16 @@
       { code: "Tab", action: "select", setter: "_set_joyp_select" }
     ];
     const GAMEPAD_ACTIONS = ["up", "down", "left", "right", "B", "A", "start", "select"];
+    const GAMEPAD_LEARN_STEPS = [
+      { action: "up", label: "Up" },
+      { action: "down", label: "Down" },
+      { action: "left", label: "Left" },
+      { action: "right", label: "Right" },
+      { action: "B", label: "B" },
+      { action: "A", label: "A" },
+      { action: "start", label: "Start" },
+      { action: "select", label: "Select" }
+    ];
 
     const canvas = document.getElementById("screen");
     const context = canvas.getContext("2d");
@@ -326,11 +365,26 @@
     const pauseButton = document.getElementById("pause");
     const resetButton = document.getElementById("reset");
     const fullscreenButton = document.getElementById("fullscreen");
+    const gamepadModeButton = document.getElementById("gamepad-mode");
+    const gamepadMapButton = document.getElementById("gamepad-map");
+    const gamepadSetup = document.getElementById("gamepad-setup");
+    const gamepadSetupText = document.getElementById("gamepad-setup-text");
+    const gamepadSetupCancel = document.getElementById("gamepad-setup-cancel");
     const pressedKeys = new Set();
     const boundKeys = new Set(KEY_BINDINGS.map(({ code }) => code));
+    const hasGamepadApi = typeof navigator.getGamepads === "function";
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
     const blankGamepadState = () => ({ up: false, down: false, left: false, right: false, B: false, A: false, start: false, select: false });
+    const loadSavedGamepadMappings = () => {
+      try {
+        const raw = localStorage.getItem(GAMEPAD_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return {};
+      }
+    };
+    const storedGamepadMappings = loadSavedGamepadMappings();
 
     const state = {
       module: null,
@@ -343,7 +397,16 @@
       audioReady: !audioContext,
       audioStartSec: 0,
       activeGamepadIndex: -1,
+      gamepadProfile: null,
+      gamepadSignature: "",
+      gamepadProfileKey: "default",
       gamepadState: blankGamepadState(),
+      gamepadSetup: {
+        active: false,
+        stepIndex: 0,
+        mapping: {},
+        waitingForNeutral: true
+      },
       paletteIndex: DEFAULT_PALETTE,
       palettePickerOpen: false,
       paused: false,
@@ -356,6 +419,266 @@
       state.palettePickerOpen = open;
       palettePicker.hidden = !open;
       paletteToggle.setAttribute("aria-expanded", String(open));
+    };
+
+    const saveStoredGamepadMappings = () => {
+      localStorage.setItem(GAMEPAD_STORAGE_KEY, JSON.stringify(storedGamepadMappings));
+    };
+
+    const normalizeStoredGamepadPreference = (entry) => {
+      if (!entry || typeof entry !== "object") {
+        return { profileKey: "default", mapping: null, name: "Custom" };
+      }
+
+      return {
+        profileKey: entry.mapping ? "custom" : (entry.profileKey === "custom" ? "custom" : "default"),
+        mapping: entry.mapping || null,
+        name: entry.name || "Custom"
+      };
+    };
+
+    const getStoredGamepadPreference = (signature) => normalizeStoredGamepadPreference(storedGamepadMappings[signature]);
+
+    const setStoredGamepadPreference = (signature, updates) => {
+      const currentPreference = getStoredGamepadPreference(signature);
+      const nextPreference = { ...currentPreference, ...updates };
+      storedGamepadMappings[signature] = nextPreference;
+      saveStoredGamepadMappings();
+      return nextPreference;
+    };
+
+    const createButtonMapping = (index) => ({ kind: "button", index });
+    const createAxisMapping = (index, direction) => ({ kind: "axis", index, direction });
+
+    const createStandardGamepadMapping = (gamepad) => createAutoGamepadMapping(
+      gamepad,
+      { dpadMode: "buttons", aIndex: 1, bIndex: 0, startIndex: 9, selectIndex: 8 }
+    );
+
+    const createLegacyGamepadMapping = (gamepad) => createAutoGamepadMapping(
+      gamepad,
+      { dpadMode: "axes", aIndex: 0, bIndex: 1, startIndex: 3, selectIndex: 2 }
+    );
+
+    const createAutoGamepadMapping = (gamepad, options = {}) => {
+      const hasDpadButtons = gamepad.buttons.length >= 16;
+      const dpadMode = options.dpadMode || (hasDpadButtons ? "buttons" : "axes");
+      const startIndex = options.startIndex ?? (gamepad.buttons.length > 9 ? 9 : gamepad.buttons.length > 7 ? 7 : 3);
+      const selectIndex = options.selectIndex ?? (gamepad.buttons.length > 8 ? 8 : gamepad.buttons.length > 6 ? 6 : 2);
+      const aIndex = options.aIndex ?? (gamepad.buttons.length > 1 ? 1 : 0);
+      const bIndex = options.bIndex ?? 0;
+
+      return {
+        up: dpadMode === "buttons" ? createButtonMapping(12) : createAxisMapping(1, -1),
+        down: dpadMode === "buttons" ? createButtonMapping(13) : createAxisMapping(1, 1),
+        left: dpadMode === "buttons" ? createButtonMapping(14) : createAxisMapping(0, -1),
+        right: dpadMode === "buttons" ? createButtonMapping(15) : createAxisMapping(0, 1),
+        B: createButtonMapping(bIndex),
+        A: createButtonMapping(aIndex),
+        start: createButtonMapping(startIndex),
+        select: createButtonMapping(selectIndex)
+      };
+    };
+
+    const getGamepadSignature = (gamepad) => `${gamepad.id}::${gamepad.mapping}::${gamepad.buttons.length}::${gamepad.axes.length}`;
+
+    const resolveDefaultGamepadProfile = (gamepad) => {
+      if (gamepad.mapping === "standard") {
+        return {
+          key: "default",
+          name: "Default",
+          source: "standard",
+          confidence: "high",
+          mapping: createStandardGamepadMapping(gamepad)
+        };
+      }
+
+      return { key: "default", name: "Default", source: "fallback", confidence: "medium", mapping: createLegacyGamepadMapping(gamepad) };
+    };
+
+    const resolveSelectedGamepadProfile = (gamepad, profileKey, storedPreference) => {
+      if (profileKey === "custom") {
+        return {
+          key: "custom",
+          name: storedPreference.name || "Custom",
+          source: storedPreference.mapping ? "custom" : "manual",
+          confidence: storedPreference.mapping ? "high" : "medium",
+          mapping: storedPreference.mapping || {}
+        };
+      }
+
+      return resolveDefaultGamepadProfile(gamepad);
+    };
+
+    const updateGamepadUI = () => {
+      if (!hasGamepadApi) {
+        gamepadModeButton.hidden = true;
+        gamepadMapButton.hidden = true;
+        gamepadSetup.hidden = true;
+        return;
+      }
+
+      if (state.activeGamepadIndex < 0 || !state.gamepadProfile) {
+        gamepadModeButton.hidden = true;
+        gamepadMapButton.hidden = true;
+        gamepadSetup.hidden = true;
+        return;
+      }
+
+      gamepadModeButton.hidden = false;
+      gamepadModeButton.textContent = state.gamepadProfileKey === "custom" ? "Gamepad: Custom" : "Gamepad: Default";
+      gamepadMapButton.hidden = state.gamepadSetup.active || state.gamepadProfileKey !== "custom";
+      gamepadSetup.hidden = !state.gamepadSetup.active;
+    };
+
+    const setGamepadProfile = (gamepad, forcedProfileKey) => {
+      state.gamepadSignature = getGamepadSignature(gamepad);
+      const storedPreference = getStoredGamepadPreference(state.gamepadSignature);
+      state.gamepadProfileKey = forcedProfileKey || storedPreference.profileKey || "default";
+      state.gamepadProfile = resolveSelectedGamepadProfile(gamepad, state.gamepadProfileKey, storedPreference);
+      updateGamepadUI();
+    };
+
+    const getActiveGamepadInputs = (gamepad) => {
+      const inputs = [];
+
+      gamepad.buttons.forEach((button, index) => {
+        const value = button ? Math.max(button.value || 0, button.pressed ? 1 : 0) : 0;
+        if (value > GAMEPAD_LEARN_DEADZONE) {
+          inputs.push({ kind: "button", index, value });
+        }
+      });
+
+      gamepad.axes.forEach((axisValue, index) => {
+        const value = Math.abs(axisValue || 0);
+        if (value > GAMEPAD_LEARN_DEADZONE) {
+          inputs.push({ kind: "axis", index, direction: axisValue < 0 ? -1 : 1, value });
+        }
+      });
+
+      inputs.sort((left, right) => right.value - left.value);
+      return inputs;
+    };
+
+    const isGamepadNeutral = (gamepad) => getActiveGamepadInputs(gamepad).length === 0;
+
+    const finishGamepadSetup = () => {
+      storedGamepadMappings[state.gamepadSignature] = {
+        profileKey: "custom",
+        name: "Custom",
+        mapping: state.gamepadSetup.mapping
+      };
+      saveStoredGamepadMappings();
+      state.gamepadProfileKey = "custom";
+      state.gamepadSetup.active = false;
+      state.gamepadSetup.stepIndex = 0;
+      state.gamepadSetup.mapping = {};
+      state.gamepadSetup.waitingForNeutral = true;
+      const currentGamepad = getCurrentGamepad();
+      if (currentGamepad) {
+        setGamepadProfile(currentGamepad);
+      } else {
+        updateGamepadUI();
+      }
+    };
+
+    const cancelGamepadSetup = () => {
+      if (state.gamepadProfileKey === "custom" && !getStoredGamepadPreference(state.gamepadSignature).mapping) {
+        state.gamepadProfileKey = "default";
+        if (state.gamepadSignature) {
+          setStoredGamepadPreference(state.gamepadSignature, { profileKey: "default", mapping: null });
+        }
+        const currentGamepad = getCurrentGamepad();
+        if (currentGamepad) {
+          setGamepadProfile(currentGamepad, "default");
+        }
+      }
+
+      state.gamepadSetup.active = false;
+      state.gamepadSetup.stepIndex = 0;
+      state.gamepadSetup.mapping = {};
+      state.gamepadSetup.waitingForNeutral = true;
+      gamepadSetupText.textContent = "";
+      updateGamepadUI();
+    };
+
+    const refreshGamepadSetupPrompt = () => {
+      if (!state.gamepadSetup.active) {
+        return;
+      }
+
+      if (state.gamepadSetup.waitingForNeutral) {
+        gamepadSetupText.textContent = "Release all buttons and sticks.";
+        return;
+      }
+
+      const step = GAMEPAD_LEARN_STEPS[state.gamepadSetup.stepIndex];
+      gamepadSetupText.textContent = `Press ${step.label}`;
+    };
+
+    const startGamepadSetup = () => {
+      const currentGamepad = getCurrentGamepad();
+      if (!currentGamepad) {
+        return;
+      }
+
+      const signature = getGamepadSignature(currentGamepad);
+      state.gamepadSignature = signature;
+      setStoredGamepadPreference(signature, { profileKey: "custom" });
+      setGamepadProfile(currentGamepad, "custom");
+
+      state.gamepadSetup.active = true;
+      state.gamepadSetup.stepIndex = 0;
+      state.gamepadSetup.mapping = {};
+      state.gamepadSetup.waitingForNeutral = true;
+      refreshGamepadSetupPrompt();
+      updateGamepadUI();
+    };
+
+    const maybeCaptureGamepadSetupInput = (gamepad) => {
+      if (!state.gamepadSetup.active) {
+        return;
+      }
+
+      if (state.gamepadSetup.waitingForNeutral) {
+        if (isGamepadNeutral(gamepad)) {
+          state.gamepadSetup.waitingForNeutral = false;
+          refreshGamepadSetupPrompt();
+        }
+        return;
+      }
+
+      const activeInputs = getActiveGamepadInputs(gamepad);
+      if (activeInputs.length === 0) {
+        return;
+      }
+
+      const chosen = activeInputs[0];
+      const step = GAMEPAD_LEARN_STEPS[state.gamepadSetup.stepIndex];
+      state.gamepadSetup.mapping[step.action] = chosen.kind === "axis"
+        ? createAxisMapping(chosen.index, chosen.direction)
+        : createButtonMapping(chosen.index);
+      state.gamepadSetup.stepIndex += 1;
+      state.gamepadSetup.waitingForNeutral = true;
+
+      if (state.gamepadSetup.stepIndex >= GAMEPAD_LEARN_STEPS.length) {
+        finishGamepadSetup();
+      } else {
+        refreshGamepadSetupPrompt();
+      }
+    };
+
+    const readMappedAction = (gamepad, mapping) => {
+      if (!mapping) {
+        return false;
+      }
+
+      if (mapping.kind === "button") {
+        return readGamepadButton(gamepad, mapping.index);
+      }
+
+      const axisValue = gamepad.axes[mapping.index] || 0;
+      return mapping.direction < 0 ? axisValue < -GAMEPAD_DEADZONE : axisValue > GAMEPAD_DEADZONE;
     };
 
     const createPaletteCard = (palette, index, isCurrent) => {
@@ -439,8 +762,34 @@
       setPalettePickerOpen(!state.palettePickerOpen);
     });
 
+    gamepadModeButton.addEventListener("click", () => {
+      const currentGamepad = getCurrentGamepad();
+      if (!currentGamepad) {
+        return;
+      }
+
+      const nextProfileKey = state.gamepadProfileKey === "custom" ? "default" : "custom";
+      const signature = getGamepadSignature(currentGamepad);
+      setStoredGamepadPreference(signature, { profileKey: nextProfileKey });
+
+      if (state.gamepadSetup.active) {
+        cancelGamepadSetup();
+      }
+
+      setGamepadProfile(currentGamepad, nextProfileKey);
+      if (nextProfileKey === "custom") {
+        startGamepadSetup();
+      } else {
+        syncInput();
+      }
+    });
+
+    gamepadMapButton.addEventListener("click", startGamepadSetup);
+    gamepadSetupCancel.addEventListener("click", cancelGamepadSetup);
+    updateGamepadUI();
+
     const getCurrentGamepad = () => {
-      if (typeof navigator.getGamepads !== "function") {
+      if (!hasGamepadApi) {
         return null;
       }
 
@@ -471,38 +820,28 @@
     const pollGamepad = () => {
       const gamepad = getCurrentGamepad();
       if (!gamepad) {
+        state.gamepadProfile = null;
+        state.gamepadSignature = "";
+        if (state.gamepadSetup.active) {
+          cancelGamepadSetup();
+        }
         state.gamepadState = blankGamepadState();
+        updateGamepadUI();
         return;
       }
 
+      const signature = getGamepadSignature(gamepad);
+      if (!state.gamepadProfile || state.gamepadSignature !== signature) {
+        setGamepadProfile(gamepad);
+      }
+
+      maybeCaptureGamepadSetupInput(gamepad);
+
       let nextGamepadState;
 
-      const isStandardMapping = gamepad.mapping === "standard";
-      if (isStandardMapping) {
-        nextGamepadState = {
-          up: readGamepadButton(gamepad, 12),
-          down: readGamepadButton(gamepad, 13),
-          left: readGamepadButton(gamepad, 14),
-          right: readGamepadButton(gamepad, 15),
-          B: readGamepadButton(gamepad, 0),
-          A: readGamepadButton(gamepad, 1),
-          start: readGamepadButton(gamepad, 9),
-          select: readGamepadButton(gamepad, 8)
-        };
-      } else {
-        const axisX = gamepad.axes[0] || 0;
-        const axisY = gamepad.axes[1] || 0;
-        nextGamepadState = {
-          up: axisY < -GAMEPAD_DEADZONE,
-          down: axisY > GAMEPAD_DEADZONE,
-          left: axisX < -GAMEPAD_DEADZONE,
-          right: axisX > GAMEPAD_DEADZONE,
-          A: readGamepadButton(gamepad, 0),
-          B: readGamepadButton(gamepad, 1),
-          select: readGamepadButton(gamepad, 2),
-          start: readGamepadButton(gamepad, 3)
-        };
-      }
+      nextGamepadState = Object.fromEntries(
+        GAMEPAD_ACTIONS.map((action) => [action, readMappedAction(gamepad, state.gamepadProfile.mapping[action])])
+      );
 
       state.gamepadState = nextGamepadState;
       if (!state.audioReady && audioContext && Object.values(nextGamepadState).some(Boolean)) {
@@ -549,7 +888,10 @@
       state.leftoverTicks = 0;
       state.audioStartSec = 0;
       state.activeGamepadIndex = -1;
+      state.gamepadProfile = null;
+      state.gamepadSignature = "";
       state.gamepadState = blankGamepadState();
+      cancelGamepadSetup();
       releaseKeyboardInput();
     };
 
