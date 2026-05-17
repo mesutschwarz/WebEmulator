@@ -26,7 +26,10 @@
     }
 
     #app {
-      width: max-content;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: min(100%, 760px);
     }
 
     canvas {
@@ -47,12 +50,14 @@
     #controls {
       display: flex;
       flex-wrap: wrap;
+      justify-content: center;
       gap: 8px;
       align-items: center;
       margin-top: 8px;
+      width: min(100%, 720px);
     }
 
-    button, select {
+    button {
       font: inherit;
       padding: 4px 8px;
       background: #222;
@@ -60,10 +65,119 @@
       border: 1px solid #555;
     }
 
-    label {
-      display: inline-flex;
+    #palette-panel {
+      width: min(100%, 720px);
+      margin-top: 10px;
+    }
+
+    #palette-toolbar {
+      display: flex;
+      justify-content: center;
+      align-items: stretch;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    #palette-toggle {
+      min-width: 78px;
+    }
+
+    #palette-current {
+      width: min(220px, 100%);
+    }
+
+    #palette-picker {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+      gap: 8px;
+    }
+
+    #palette-picker[hidden] {
+      display: none;
+    }
+
+    .palette-button {
+      padding: 6px;
+      border: 1px solid #555;
+      background: #1a1a1a;
+      cursor: pointer;
+    }
+
+    .palette-button[aria-pressed="true"] {
+      border-color: #ddd;
+      box-shadow: 0 0 0 1px #ddd inset;
+    }
+
+    .palette-button-current {
+      cursor: default;
+    }
+
+    .palette-button-current .palette-row {
+      grid-template-columns: repeat(4, 1fr);
+    }
+
+    .palette-button-current .palette-row-label {
+      display: none;
+    }
+
+    .palette-topline {
+      display: flex;
+      justify-content: space-between;
       align-items: center;
-      gap: 6px;
+      margin-bottom: 4px;
+      gap: 8px;
+    }
+
+    .palette-title {
+      flex: 1;
+      min-width: 0;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 11px;
+      color: #ddd;
+    }
+
+    .palette-id {
+      font-size: 9px;
+      line-height: 1;
+      color: #8f8f8f;
+      letter-spacing: 0.04em;
+      flex: none;
+    }
+
+    .palette-grid {
+      display: grid;
+      gap: 3px;
+    }
+
+    .palette-row {
+      display: grid;
+      grid-template-columns: 18px repeat(4, 1fr);
+      gap: 2px;
+      align-items: center;
+    }
+
+    .palette-row-label {
+      font-size: 10px;
+      color: #aaa;
+      text-align: center;
+    }
+
+    .palette-cell {
+      height: 12px;
+      min-width: 0;
+    }
+
+    .palette-cell-transparent {
+      background-image:
+        linear-gradient(45deg, #111 25%, transparent 25%, transparent 75%, #111 75%, #111),
+        linear-gradient(45deg, #111 25%, transparent 25%, transparent 75%, #111 75%, #111),
+        linear-gradient(var(--palette-color), var(--palette-color));
+      background-position: 0 0, 4px 4px, 0 0;
+      background-size: 8px 8px, 8px 8px, 100% 100%;
     }
   </style>
 </head>
@@ -74,18 +188,25 @@
       <button type="button" data-scale="2">2x</button>
       <button type="button" data-scale="3">3x</button>
       <button type="button" id="fullscreen">Fullscreen</button>
-      <label>
-        Palette
-        <select id="palette"></select>
-      </label>
       <button type="button" id="pause">Pause</button>
       <button type="button" id="reset">Reset</button>
     </div>
+    <div id="palette-panel">
+      <div id="palette-toolbar">
+        <button type="button" id="palette-toggle" aria-expanded="false" aria-controls="palette-picker">Palette</button>
+        <div id="palette-current"></div>
+      </div>
+      <div id="palette-picker" aria-label="Palette picker" hidden></div>
+    </div>
   </div>
+  <script>
+    window.DEFAULT_PALETTE = 3;
+  </script>
   <script src="binjgb.js"></script>
   <script>
     "use strict";
 
+    const DEFAULT_PALETTE = window.DEFAULT_PALETTE;
     const CPU_TICKS_PER_SECOND = 4194304;
     const AUDIO_FRAMES = 4096;
     const AUDIO_LATENCY_SEC = 0.1;
@@ -93,7 +214,96 @@
     const EVENT_NEW_FRAME = 1;
     const EVENT_AUDIO_BUFFER_FULL = 2;
     const EVENT_UNTIL_TICKS = 4;
-    const DEFAULT_PALETTE = 79;
+    const PALETTES = [
+      { name: "Grayscale", colors: [["#FFFFFF", "#AAAAAA", "#555555", "#000000"], ["#FFFFFF", "#AAAAAA", "#555555", "#000000"], ["#FFFFFF", "#AAAAAA", "#555555", "#000000"]] },
+      { name: "Right", colors: [["#FFFFFF", "#00FF52", "#0042FF", "#000000"], ["#FFFFFF", "#00FF52", "#0042FF", "#000000"], ["#FFFFFF", "#00FF52", "#0042FF", "#000000"]] },
+      { name: "A + Down", colors: [["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#00FFFF", "#0000FF", "#000000"]] },
+      { name: "Up", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "B + Right", colors: [["#000000", "#848400", "#00DEFF", "#FFFFFF"], ["#000000", "#848400", "#00DEFF", "#FFFFFF"], ["#000000", "#848400", "#00DEFF", "#FFFFFF"]] },
+      { name: "B + Left", colors: [["#FFFFFF", "#A5A5A5", "#525252", "#000000"], ["#FFFFFF", "#A5A5A5", "#525252", "#000000"], ["#FFFFFF", "#A5A5A5", "#525252", "#000000"]] },
+      { name: "Down", colors: [["#A5FFFF", "#9494FF", "#FF9494", "#000000"], ["#A5FFFF", "#9494FF", "#FF9494", "#000000"], ["#A5FFFF", "#9494FF", "#FF9494", "#000000"]] },
+      { name: "B + Up", colors: [["#C5E6FF", "#849CCE", "#296B84", "#08315A"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "A + Right", colors: [["#FFFFFF", "#31FF7B", "#C56300", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "A + Left", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "A + Up", colors: [["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Left", colors: [["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"]] },
+      { name: "B + Down", colors: [["#FFFFFF", "#00FFFF", "#004A7B", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"]] },
+      { name: "Balloon Kid, Tetris Blast", colors: [["#FFFFFF", "#009CFF", "#0000FF", "#000000"], ["#FFFFFF", "#009CFF", "#0000FF", "#000000"], ["#FFFFFF", "#009CFF", "#0000FF", "#000000"]] },
+      { name: "Tetris, Pokemon - Pikachu", colors: [["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#00FFFF", "#0000FF", "#000000"]] },
+      { name: "Alleyway", colors: [["#FF9CA5", "#00FFFF", "#006300", "#000000"], ["#FF9CA5", "#00FFFF", "#006300", "#000000"], ["#FF9CA5", "#00FFFF", "#006300", "#000000"]] },
+      { name: "Yakuman, F-1 Race, Mario no Picross, Picross 2, Kirby no Kirakira Kids, Nigel Mansells World Championship Racing, Game Boy Gallery, Kirbys Star Stacker", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "Space Invaders , Arcade Classic No. 3 - Galaga & Galaxian, Solar Striker", colors: [["#000000", "#848400", "#00DEFF", "#FFFFFF"], ["#000000", "#848400", "#00DEFF", "#FFFFFF"], ["#000000", "#848400", "#00DEFF", "#FFFFFF"]] },
+      { name: "X", colors: [["#FFFFFF", "#A5A5A5", "#525252", "#000000"], ["#FFFFFF", "#A5A5A5", "#525252", "#000000"], ["#FFFFFF", "#A5A5A5", "#525252", "#000000"]] },
+      { name: "Pocket Camera", colors: [["#FFFFFF", "#00CEFF", "#00639C", "#000000"], ["#FFFFFF", "#00CEFF", "#00639C", "#000000"], ["#FFFFFF", "#00CEFF", "#00639C", "#000000"]] },
+      { name: "Radar Mission", colors: [["#FFFFFF", "#84ADAD", "#7B7342", "#000000"], ["#FFFFFF", "#0073FF", "#004294", "#000000"], ["#FFFFFF", "#84ADAD", "#7B7342", "#000000"]] },
+      { name: "Pokemon Blue", colors: [["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Kaeru no Tame ni Kane wa Naru", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"]] },
+      { name: "Pokemon Red", colors: [["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "James Bond 007, Pokemon Green", colors: [["#FFFFFF", "#31FF7B", "#C56300", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#31FF7B", "#C56300", "#000000"]] },
+      { name: "Dr. Mario", colors: [["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Pinocchio", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#42C5FF", "#00D6FF", "#003A94", "#00004A"]] },
+      { name: "Moguranya, Mole Mania", colors: [["#FFFFFF", "#84ADAD", "#7B7342", "#000000"], ["#FFFFFF", "#0073FF", "#004294", "#000000"], ["#FFFFFF", "#0073FF", "#004294", "#000000"]] },
+      { name: "Game Boy Gallery, Game Boy Gallery 2, Game & Watch Gallery", colors: [["#FFFFFF", "#00FF7B", "#0073B5", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Yoshi, Mario & Yoshi", colors: [["#FFFFFF", "#00FF52", "#0042FF", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Donkey Kong", colors: [["#FFFFFF", "#009CFF", "#0000FF", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Kirby no Pinball", colors: [["#FF9CA5", "#00FFFF", "#006300", "#000000"], ["#5263FF", "#0000D6", "#000063", "#000000"], ["#5263FF", "#0000D6", "#000063", "#000000"]] },
+      { name: "Super Mario Land", colors: [["#FFB5B5", "#94FFFF", "#425AAD", "#000000"], ["#000000", "#FFFFFF", "#8484FF", "#3A3A94"], ["#000000", "#FFFFFF", "#8484FF", "#3A3A94"]] },
+      { name: "Pocket Bomberman", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#42C5FF", "#00D6FF", "#003A94", "#00004A"], ["#42C5FF", "#00D6FF", "#003A94", "#00004A"]] },
+      { name: "Kid Icarus - Of Myths and Monsters", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Play Action Football, Nintendo World Cup, Arcade Classic No. 1 - Asteroids & Missile Command, Toy Story, Golf", colors: [["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "King of the Zoo, Dynablaster, Chessmaster, The", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Battletoads in Ragnaroks World", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"]] },
+      { name: "Default CGB palette.", colors: [["#FFFFFF", "#31FF7B", "#C56300", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Tetris Plus, Ken Griffey Jr. presents Major League Baseball, Wario Blast Featuring Bomberman!, Arcade Classic No. 2 - Centipede & Millipede", colors: [["#FFFFFF", "#31FF7B", "#C56300", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Yoshi no Panepon, Tetris Attack", colors: [["#FFFFFF", "#00FF52", "#0042FF", "#000000"], ["#FFFFFF", "#00FF52", "#0042FF", "#000000"], ["#FFFFFF", "#FFBD5A", "#0000FF", "#FF0000"]] },
+      { name: "Yoshi no Cookie, Yoshis Cookie", colors: [["#FFFFFF", "#009CFF", "#0000FF", "#000000"], ["#FFFFFF", "#009CFF", "#0000FF", "#000000"], ["#FFFFFF", "#FFBD5A", "#0000FF", "#FF0000"]] },
+      { name: "Qix, Tetris Flash, Tetris 2", colors: [["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#00FFFF", "#0000FF", "#000000"], ["#FFFFFF", "#FFBD5A", "#0000FF", "#FF0000"]] },
+      { name: "Wario Land - Super Mario Land 3, Game Boy Wars", colors: [["#FFFFFF", "#84ADAD", "#7B7342", "#000000"], ["#FFFFFF", "#0073FF", "#004294", "#000000"], ["#FFFFFF", "#FFBD5A", "#0000FF", "#FF0000"]] },
+      { name: "Super Donkey Kong GB, Donkey Kong Land", colors: [["#9CFFFF", "#FFB594", "#739463", "#3A3A00"], ["#42C5FF", "#00D6FF", "#003A94", "#00004A"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Tennis, Top Rank Tennis, Top Ranking Tennis, Soccer", colors: [["#00FF6B", "#FFFFFF", "#4A52FF", "#000000"], ["#FFFFFF", "#FFFFFF", "#FFA563", "#FF0000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "Baseball", colors: [["#00DE52", "#0084FF", "#00FFFF", "#FFFFFF"], ["#FFFFFF", "#FFFFFF", "#FFA563", "#FF0000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"]] },
+      { name: "Hoshi no Kirby, Kirbys Dream Land, Hoshi no Kirby 2, Kirby no Block Ball", colors: [["#FF9CA5", "#00FFFF", "#006300", "#000000"], ["#5263FF", "#0000D6", "#000063", "#000000"], ["#FF0000", "#FFFFFF", "#7BFFFF", "#FF8400"]] },
+      { name: "Super Mario Land 2 - 6 Golden Coins", colors: [["#CEFFFF", "#EFEF63", "#31849C", "#5A5A5A"], ["#FFFFFF", "#0073FF", "#004294", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Wave Race", colors: [["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#7BFFFF", "#FF8400", "#0000FF"]] },
+      { name: "Donkey Kong Land, Donkey Kong Land 2, Donkey Kong Land III", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#42C5FF", "#00D6FF", "#003A94", "#00004A"], ["#FFFFFF", "#FFBD5A", "#0000FF", "#FF0000"]] },
+      { name: "Killer Instinct", colors: [["#FFFFFF", "#DE8C8C", "#8C5252", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"]] },
+      { name: "Othello, Mystic Quest, Magnetic Soccer, Vegas Stakes", colors: [["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Super R.C. Pro-Am, Mega Man - Dr. Wilys Revenge, Adventures of Lolo, Mega Man III, Street Fighter II, Arcade Classic No. 4 - Defender & Joust, Battle Arena Toshinden, King of Fighters 95, The", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"]] },
+      { name: "Legend of Zelda, The - Links Awakening", colors: [["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#00FF00", "#008431", "#004A00"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Star Wars, A Boy and His Blob in the Rescue of Princess Blobette", colors: [["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Metroid II - Return of Samus", colors: [["#FFFFFF", "#FFA563", "#FF0000", "#000000"], ["#00FFFF", "#0000FF", "#000063", "#000000"], ["#FFFFFF", "#31FF7B", "#008400", "#000000"]] },
+      { name: "Wario Land II", colors: [["#FFFFFF", "#84ADAD", "#7B7342", "#000000"], ["#FFFFFF", "#63ADFF", "#003184", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Pac-In-Time", colors: [["#FFFFFF", "#31FF7B", "#C56300", "#000000"], ["#FFFFFF", "#8484FF", "#3A3A94", "#000000"], ["#FFFFFF", "#FFA563", "#FF0000", "#000000"]] },
+      { name: "Kirokaze", colors: [["#E4F3E2", "#44E394", "#8F8746", "#502C33"], ["#E4F3E2", "#44E394", "#8F8746", "#502C33"], ["#E4F3E2", "#44E394", "#8F8746", "#502C33"]] },
+      { name: "Links Awakening SGB", colors: [["#B5FFFF", "#7BC67B", "#428C6B", "#21395A"], ["#B5FFFF", "#7BC67B", "#428C6B", "#21395A"], ["#B5FFFF", "#7BC67B", "#428C6B", "#21395A"]] },
+      { name: "SGB", colors: [["#C6E7F7", "#498ED6", "#2537A6", "#501E33"], ["#C6E7F7", "#498ED6", "#2537A6", "#501E33"], ["#C6E7F7", "#498ED6", "#2537A6", "#501E33"]] },
+      { name: "BGB", colors: [["#D0F8E0", "#70C088", "#566834", "#201808"], ["#D0F8E0", "#70C088", "#566834", "#201808"], ["#D0F8E0", "#70C088", "#566834", "#201808"]] },
+      { name: "Pokemon BGB", colors: [["#FFEFFF", "#8CB5F7", "#9C7384", "#101018"], ["#FFEFFF", "#8CB5F7", "#9C7384", "#101018"], ["#FFEFFF", "#8CB5F7", "#9C7384", "#101018"]] },
+      { name: "GB Chocolate by GrafxKid", colors: [["#C2E4FF", "#56A4DC", "#4C60A9", "#362942"], ["#C2E4FF", "#56A4DC", "#4C60A9", "#362942"], ["#C2E4FF", "#56A4DC", "#4C60A9", "#362942"]] },
+      { name: "Mega Man V SGB", colors: [["#CECECE", "#DF9E6F", "#8E6742", "#332510"], ["#CECECE", "#DF9E6F", "#8E6742", "#332510"], ["#CECECE", "#DF9E6F", "#8E6742", "#332510"]] },
+      { name: "Ice Cream GB by Kerri Lake", colors: [["#D3F6FF", "#75A8F9", "#6F6BEB", "#583F7C"], ["#D3F6FF", "#75A8F9", "#6F6BEB", "#583F7C"], ["#D3F6FF", "#75A8F9", "#6F6BEB", "#583F7C"]] },
+      { name: "Mist GB by Kerri Lake", colors: [["#C2F0C4", "#A8B95A", "#6E601E", "#001B2D"], ["#C2F0C4", "#A8B95A", "#6E601E", "#001B2D"], ["#C2F0C4", "#A8B95A", "#6E601E", "#001B2D"]] },
+      { name: "Arne", colors: [["#6BB5AC", "#488476", "#3F503F", "#373124"], ["#6BB5AC", "#488476", "#3F503F", "#373124"], ["#6BB5AC", "#488476", "#3F503F", "#373124"]] },
+      { name: "Rustic by Kerri Lake", colors: [["#A1B4ED", "#6868A9", "#624476", "#37212C"], ["#A1B4ED", "#6868A9", "#624476", "#37212C"], ["#A1B4ED", "#6868A9", "#624476", "#37212C"]] },
+      { name: "Grapefruit by GrafxKid", colors: [["#DDF5FF", "#6BB2F4", "#9165B7", "#6C2965"], ["#DDF5FF", "#6BB2F4", "#9165B7", "#6C2965"], ["#DDF5FF", "#6BB2F4", "#9165B7", "#6C2965"]] },
+      { name: "Kirby SGB", colors: [["#F7BEF7", "#8686E7", "#E73377", "#962C2C"], ["#F7BEF7", "#8686E7", "#E73377", "#962C2C"], ["#F7BEF7", "#8686E7", "#E73377", "#962C2C"]] },
+      { name: "Black Zero", colors: [["#16847E", "#467B57", "#495D38", "#3D462E"], ["#16847E", "#467B57", "#495D38", "#3D462E"], ["#16847E", "#467B57", "#495D38", "#3D462E"]] },
+      { name: "Andrade", colors: [["#C0EEE3", "#89BAAE", "#45675E", "#202020"], ["#C0EEE3", "#89BAAE", "#45675E", "#202020"], ["#C0EEE3", "#89BAAE", "#45675E", "#202020"]] },
+      { name: "GB pocket green by GrafxKid", colors: [["#B4F4DB", "#96C3AB", "#78927B", "#5A624C"], ["#B4F4DB", "#96C3AB", "#78927B", "#5A624C"], ["#B4F4DB", "#96C3AB", "#78927B", "#5A624C"]] },
+      { name: "PJ GB", colors: [["#A1CFC4", "#6D958B", "#3C534D", "#1F1F1F"], ["#A1CFC4", "#6D958B", "#3C534D", "#1F1F1F"], ["#A1CFC4", "#6D958B", "#3C534D", "#1F1F1F"]] },
+      { name: "Metroid II SGB", colors: [["#1EDFAE", "#5825B6", "#607E04", "#00172C"], ["#1EDFAE", "#5825B6", "#607E04", "#00172C"], ["#1EDFAE", "#5825B6", "#607E04", "#00172C"]] },
+      { name: "Nymph GB by Kerri Lake", colors: [["#8CEFA1", "#95AC3F", "#766144", "#37212C"], ["#8CEFA1", "#95AC3F", "#766144", "#37212C"], ["#8CEFA1", "#95AC3F", "#766144", "#37212C"]] },
+      { name: "Darkboy4 by Smalls", colors: [["#F3E8E7", "#C3838C", "#8F4D63", "#190B12"], ["#F3E8E7", "#C3838C", "#8F4D63", "#190B12"], ["#F3E8E7", "#C3838C", "#8F4D63", "#190B12"]] },
+      { name: "Kid Icarus SGB", colors: [["#F7F7CE", "#508EF7", "#00009E", "#00001E"], ["#F7F7CE", "#508EF7", "#00009E", "#00001E"], ["#F7F7CE", "#508EF7", "#00009E", "#00001E"]] },
+      { name: "Easy Greens by GrafxKid", colors: [["#77DDEB", "#00BCA1", "#33880D", "#334300"], ["#77DDEB", "#00BCA1", "#33880D", "#334300"], ["#77DDEB", "#00BCA1", "#33880D", "#334300"]] },
+      { name: "Super Mario Land 2 SGB", colors: [["#B6F7EF", "#77A6DF", "#00C611", "#000000"], ["#B6F7EF", "#77A6DF", "#00C611", "#000000"], ["#B6F7EF", "#77A6DF", "#00C611", "#000000"]] },
+      { name: "Wish GB by Kerri Lake", colors: [["#FFE58B", "#CF8F60", "#E85075", "#4C2E62"], ["#FFE58B", "#CF8F60", "#E85075", "#4C2E62"], ["#FFE58B", "#CF8F60", "#E85075", "#4C2E62"]] },
+      { name: "GB Studio", colors: [["#DEFFEF", "#94D7AD", "#739252", "#423418"], ["#DEFFEF", "#94D7AD", "#739252", "#423418"], ["#DEFFEF", "#94D7AD", "#739252", "#423418"]] }
+    ];
+    const toCssColor = (packedColor) => `#${packedColor.slice(5, 7)}${packedColor.slice(3, 5)}${packedColor.slice(1, 3)}`;
+    for (const palette of PALETTES) {
+      palette.colors = palette.colors.map((row) => row.map(toCssColor));
+    }
     const KEY_BINDINGS = [
       ["ArrowUp", "_set_joyp_up"],
       ["ArrowDown", "_set_joyp_down"],
@@ -108,7 +318,9 @@
     const canvas = document.getElementById("screen");
     const context = canvas.getContext("2d");
     const imageData = context.createImageData(canvas.width, canvas.height);
-    const paletteSelect = document.getElementById("palette");
+    const paletteCurrent = document.getElementById("palette-current");
+    const palettePicker = document.getElementById("palette-picker");
+    const paletteToggle = document.getElementById("palette-toggle");
     const pauseButton = document.getElementById("pause");
     const resetButton = document.getElementById("reset");
     const fullscreenButton = document.getElementById("fullscreen");
@@ -116,10 +328,6 @@
     const boundKeys = new Set(KEY_BINDINGS.map(([code]) => code));
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
-
-    for (let palette = 0; palette < 84; palette += 1) {
-      paletteSelect.add(new Option(String(palette), String(palette), palette === DEFAULT_PALETTE, palette === DEFAULT_PALETTE));
-    }
 
     const state = {
       module: null,
@@ -131,11 +339,100 @@
       audioBuffer: null,
       audioReady: !audioContext,
       audioStartSec: 0,
+      paletteIndex: DEFAULT_PALETTE,
+      palettePickerOpen: false,
       paused: false,
       lastRafSec: 0,
       leftoverTicks: 0,
       rafId: 0
     };
+
+    const setPalettePickerOpen = (open) => {
+      state.palettePickerOpen = open;
+      palettePicker.hidden = !open;
+      paletteToggle.setAttribute("aria-expanded", String(open));
+    };
+
+    const createPaletteCard = (palette, index, isCurrent) => {
+      const rowLabels = ["BG", "O0", "O1"];
+      const button = document.createElement(isCurrent ? "div" : "button");
+      if (!isCurrent) {
+        button.type = "button";
+      }
+      button.className = `palette-button${isCurrent ? " palette-button-current" : ""}`;
+      button.dataset.palette = String(index);
+      button.title = `${index}: ${palette.name}`;
+
+      const topline = document.createElement("div");
+      topline.className = "palette-topline";
+
+      const title = document.createElement("span");
+      title.className = "palette-title";
+      title.textContent = palette.name;
+      topline.append(title);
+
+      const paletteId = document.createElement("span");
+      paletteId.className = "palette-id";
+      paletteId.textContent = `#${index}`;
+      topline.append(paletteId);
+
+      const grid = document.createElement("div");
+      grid.className = "palette-grid";
+
+      palette.colors.forEach((row, rowIndex) => {
+        const rowElement = document.createElement("div");
+        rowElement.className = "palette-row";
+
+        const label = document.createElement("span");
+        label.className = "palette-row-label";
+        label.textContent = rowLabels[rowIndex];
+        rowElement.append(label);
+
+        row.forEach((color, colorIndex) => {
+          const cell = document.createElement("span");
+          cell.className = "palette-cell";
+          if (rowIndex > 0 && colorIndex === 0) {
+            cell.classList.add("palette-cell-transparent");
+            cell.style.setProperty("--palette-color", color);
+            cell.title = "Sprite color 0 is transparent in-game";
+          } else {
+            cell.style.background = color;
+          }
+          rowElement.append(cell);
+        });
+
+        grid.append(rowElement);
+      });
+
+      button.append(topline, grid);
+      return button;
+    };
+
+    const updatePaletteSelectionUI = () => {
+      palettePicker.querySelectorAll(".palette-button").forEach((button) => {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.palette) === state.paletteIndex));
+      });
+      paletteCurrent.replaceChildren(createPaletteCard(PALETTES[state.paletteIndex], state.paletteIndex, true));
+    };
+
+    const buildPalettePicker = () => {
+      PALETTES.forEach((palette, index) => {
+        const button = createPaletteCard(palette, index, false);
+        button.addEventListener("click", () => {
+          state.paletteIndex = index;
+          applyPalette();
+          updatePaletteSelectionUI();
+          setPalettePickerOpen(false);
+        });
+        palettePicker.append(button);
+      });
+
+      updatePaletteSelectionUI();
+    };
+
+    paletteToggle.addEventListener("click", () => {
+      setPalettePickerOpen(!state.palettePickerOpen);
+    });
 
     const syncInput = () => {
       if (!state.emulator) {
@@ -153,7 +450,7 @@
 
     const applyPalette = () => {
       if (state.emulator) {
-        state.module._emulator_set_builtin_palette(state.emulator, Number(paletteSelect.value));
+        state.module._emulator_set_builtin_palette(state.emulator, state.paletteIndex);
       }
     };
 
@@ -211,6 +508,7 @@
       );
       applyPalette();
       syncInput();
+      updatePaletteSelectionUI();
     };
 
     const queueAudio = () => {
@@ -271,8 +569,6 @@
       canvas.style.width = `${canvas.width * scale}px`;
       canvas.style.height = `${canvas.height * scale}px`;
     };
-
-    paletteSelect.addEventListener("change", applyPalette);
 
     pauseButton.addEventListener("click", () => {
       state.paused = !state.paused;
@@ -353,6 +649,7 @@
       }
 
       state.romBytes = new Uint8Array(await response.arrayBuffer());
+      buildPalettePicker();
       createEmulator();
       setScale(3);
       updateFullscreenButton();
