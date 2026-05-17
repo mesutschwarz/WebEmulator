@@ -210,6 +210,7 @@
     const CPU_TICKS_PER_SECOND = 4194304;
     const AUDIO_FRAMES = 4096;
     const AUDIO_LATENCY_SEC = 0.1;
+    const GAMEPAD_DEADZONE = 0.5;
     const MAX_UPDATE_SEC = 5 / 60;
     const EVENT_NEW_FRAME = 1;
     const EVENT_AUDIO_BUFFER_FULL = 2;
@@ -305,15 +306,16 @@
       palette.colors = palette.colors.map((row) => row.map(toCssColor));
     }
     const KEY_BINDINGS = [
-      ["ArrowUp", "_set_joyp_up"],
-      ["ArrowDown", "_set_joyp_down"],
-      ["ArrowLeft", "_set_joyp_left"],
-      ["ArrowRight", "_set_joyp_right"],
-      ["KeyZ", "_set_joyp_B"],
-      ["KeyX", "_set_joyp_A"],
-      ["Enter", "_set_joyp_start"],
-      ["Tab", "_set_joyp_select"]
+      { code: "ArrowUp", action: "up", setter: "_set_joyp_up" },
+      { code: "ArrowDown", action: "down", setter: "_set_joyp_down" },
+      { code: "ArrowLeft", action: "left", setter: "_set_joyp_left" },
+      { code: "ArrowRight", action: "right", setter: "_set_joyp_right" },
+      { code: "KeyZ", action: "B", setter: "_set_joyp_B" },
+      { code: "KeyX", action: "A", setter: "_set_joyp_A" },
+      { code: "Enter", action: "start", setter: "_set_joyp_start" },
+      { code: "Tab", action: "select", setter: "_set_joyp_select" }
     ];
+    const GAMEPAD_ACTIONS = ["up", "down", "left", "right", "B", "A", "start", "select"];
 
     const canvas = document.getElementById("screen");
     const context = canvas.getContext("2d");
@@ -325,9 +327,10 @@
     const resetButton = document.getElementById("reset");
     const fullscreenButton = document.getElementById("fullscreen");
     const pressedKeys = new Set();
-    const boundKeys = new Set(KEY_BINDINGS.map(([code]) => code));
+    const boundKeys = new Set(KEY_BINDINGS.map(({ code }) => code));
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
+    const blankGamepadState = () => ({ up: false, down: false, left: false, right: false, B: false, A: false, start: false, select: false });
 
     const state = {
       module: null,
@@ -339,6 +342,8 @@
       audioBuffer: null,
       audioReady: !audioContext,
       audioStartSec: 0,
+      activeGamepadIndex: -1,
+      gamepadState: blankGamepadState(),
       paletteIndex: DEFAULT_PALETTE,
       palettePickerOpen: false,
       paused: false,
@@ -434,16 +439,88 @@
       setPalettePickerOpen(!state.palettePickerOpen);
     });
 
+    const getCurrentGamepad = () => {
+      if (typeof navigator.getGamepads !== "function") {
+        return null;
+      }
+
+      const gamepads = navigator.getGamepads();
+      if (state.activeGamepadIndex >= 0) {
+        const activeGamepad = gamepads[state.activeGamepadIndex];
+        if (activeGamepad && activeGamepad.connected) {
+          return activeGamepad;
+        }
+      }
+
+      for (const gamepad of gamepads) {
+        if (gamepad && gamepad.connected) {
+          state.activeGamepadIndex = gamepad.index;
+          return gamepad;
+        }
+      }
+
+      state.activeGamepadIndex = -1;
+      return null;
+    };
+
+    const readGamepadButton = (gamepad, index) => {
+      const button = gamepad.buttons[index];
+      return Boolean(button) && (button.pressed || button.value > 0.5);
+    };
+
+    const pollGamepad = () => {
+      const gamepad = getCurrentGamepad();
+      if (!gamepad) {
+        state.gamepadState = blankGamepadState();
+        return;
+      }
+
+      let nextGamepadState;
+
+      const isStandardMapping = gamepad.mapping === "standard";
+      if (isStandardMapping) {
+        nextGamepadState = {
+          up: readGamepadButton(gamepad, 12),
+          down: readGamepadButton(gamepad, 13),
+          left: readGamepadButton(gamepad, 14),
+          right: readGamepadButton(gamepad, 15),
+          B: readGamepadButton(gamepad, 0),
+          A: readGamepadButton(gamepad, 1),
+          start: readGamepadButton(gamepad, 9),
+          select: readGamepadButton(gamepad, 8)
+        };
+      } else {
+        const axisX = gamepad.axes[0] || 0;
+        const axisY = gamepad.axes[1] || 0;
+        nextGamepadState = {
+          up: axisY < -GAMEPAD_DEADZONE,
+          down: axisY > GAMEPAD_DEADZONE,
+          left: axisX < -GAMEPAD_DEADZONE,
+          right: axisX > GAMEPAD_DEADZONE,
+          A: readGamepadButton(gamepad, 0),
+          B: readGamepadButton(gamepad, 1),
+          select: readGamepadButton(gamepad, 2),
+          start: readGamepadButton(gamepad, 3)
+        };
+      }
+
+      state.gamepadState = nextGamepadState;
+      if (!state.audioReady && audioContext && Object.values(nextGamepadState).some(Boolean)) {
+        state.audioReady = true;
+        audioContext.resume();
+      }
+    };
+
     const syncInput = () => {
       if (!state.emulator) {
         return;
       }
-      for (const [code, setter] of KEY_BINDINGS) {
-        state.module[setter](state.emulator, pressedKeys.has(code));
+      for (const { code, action, setter } of KEY_BINDINGS) {
+        state.module[setter](state.emulator, pressedKeys.has(code) || state.gamepadState[action]);
       }
     };
 
-    const releaseInput = () => {
+    const releaseKeyboardInput = () => {
       pressedKeys.clear();
       syncInput();
     };
@@ -471,7 +548,9 @@
       state.lastRafSec = 0;
       state.leftoverTicks = 0;
       state.audioStartSec = 0;
-      releaseInput();
+      state.activeGamepadIndex = -1;
+      state.gamepadState = blankGamepadState();
+      releaseKeyboardInput();
     };
 
     const createEmulator = () => {
@@ -507,6 +586,7 @@
         state.module._get_audio_buffer_capacity(state.emulator)
       );
       applyPalette();
+      pollGamepad();
       syncInput();
       updatePaletteSelectionUI();
     };
@@ -536,6 +616,8 @@
 
     const frame = (startMs) => {
       state.rafId = requestAnimationFrame(frame);
+      pollGamepad();
+      syncInput();
       if (!state.emulator || state.paused) {
         return;
       }
@@ -639,7 +721,21 @@
       syncInput();
     });
 
-    window.addEventListener("blur", releaseInput);
+    window.addEventListener("blur", releaseKeyboardInput);
+
+    window.addEventListener("gamepadconnected", (event) => {
+      state.activeGamepadIndex = event.gamepad.index;
+      pollGamepad();
+      syncInput();
+    });
+
+    window.addEventListener("gamepaddisconnected", (event) => {
+      if (event.gamepad.index === state.activeGamepadIndex) {
+        state.activeGamepadIndex = -1;
+      }
+      pollGamepad();
+      syncInput();
+    });
 
     (async () => {
       state.module = await Binjgb();
