@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binjgb</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: #111;
+      color: #eee;
+      font: 13px/1.4 sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    #app {
+      width: max-content;
+    }
+
+    canvas {
+      display: block;
+      width: 480px;
+      height: 432px;
+      background: #000;
+      image-rendering: pixelated;
+    }
+
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    button, select {
+      font: inherit;
+      padding: 4px 8px;
+      background: #222;
+      color: inherit;
+      border: 1px solid #555;
+    }
+
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="screen" width="160" height="144">No Canvas Support</canvas>
+    <div id="controls">
+      <button type="button" data-scale="2">2x</button>
+      <button type="button" data-scale="3">3x</button>
+      <button type="button" id="fullscreen">Fullscreen</button>
+      <label>
+        Palette
+        <select id="palette"></select>
+      </label>
+      <button type="button" id="pause">Pause</button>
+      <button type="button" id="reset">Reset</button>
+    </div>
+  </div>
+  <script src="binjgb.js"></script>
+  <script>
+    "use strict";
+
+    const CPU_TICKS_PER_SECOND = 4194304;
+    const AUDIO_FRAMES = 4096;
+    const AUDIO_LATENCY_SEC = 0.1;
+    const MAX_UPDATE_SEC = 5 / 60;
+    const EVENT_NEW_FRAME = 1;
+    const EVENT_AUDIO_BUFFER_FULL = 2;
+    const EVENT_UNTIL_TICKS = 4;
+    const DEFAULT_PALETTE = 79;
+    const KEY_BINDINGS = [
+      ["ArrowUp", "_set_joyp_up"],
+      ["ArrowDown", "_set_joyp_down"],
+      ["ArrowLeft", "_set_joyp_left"],
+      ["ArrowRight", "_set_joyp_right"],
+      ["KeyZ", "_set_joyp_B"],
+      ["KeyX", "_set_joyp_A"],
+      ["Enter", "_set_joyp_start"],
+      ["Tab", "_set_joyp_select"]
+    ];
+
+    const app = document.getElementById("app");
+    const canvas = document.getElementById("screen");
+    const context = canvas.getContext("2d");
+    const imageData = context.createImageData(canvas.width, canvas.height);
+    const paletteSelect = document.getElementById("palette");
+    const pauseButton = document.getElementById("pause");
+    const resetButton = document.getElementById("reset");
+    const fullscreenButton = document.getElementById("fullscreen");
+    const pressedKeys = new Set();
+    const boundKeys = new Set(KEY_BINDINGS.map(([code]) => code));
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
+
+    for (let palette = 0; palette < 84; palette += 1) {
+      paletteSelect.add(new Option(String(palette), String(palette), palette === DEFAULT_PALETTE, palette === DEFAULT_PALETTE));
+    }
+
+    const state = {
+      module: null,
+      romBytes: null,
+      emulator: 0,
+      romDataPtr: 0,
+      joypad: 0,
+      frameBuffer: null,
+      audioBuffer: null,
+      audioReady: !audioContext,
+      audioStartSec: 0,
+      paused: false,
+      lastRafSec: 0,
+      leftoverTicks: 0,
+      rafId: 0
+    };
+
+    const syncInput = () => {
+      if (!state.emulator) {
+        return;
+      }
+      for (const [code, setter] of KEY_BINDINGS) {
+        state.module[setter](state.emulator, pressedKeys.has(code));
+      }
+    };
+
+    const releaseInput = () => {
+      pressedKeys.clear();
+      syncInput();
+    };
+
+    const applyPalette = () => {
+      if (state.emulator) {
+        state.module._emulator_set_builtin_palette(state.emulator, Number(paletteSelect.value));
+      }
+    };
+
+    const destroyEmulator = () => {
+      if (!state.module || !state.emulator) {
+        return;
+      }
+      if (state.joypad) {
+        state.module._joypad_delete(state.joypad);
+      }
+      state.module._emulator_delete(state.emulator);
+      state.module._free(state.romDataPtr);
+      state.emulator = 0;
+      state.romDataPtr = 0;
+      state.joypad = 0;
+      state.frameBuffer = null;
+      state.audioBuffer = null;
+      state.lastRafSec = 0;
+      state.leftoverTicks = 0;
+      state.audioStartSec = 0;
+      releaseInput();
+    };
+
+    const createEmulator = () => {
+      destroyEmulator();
+
+      const romSize = (state.romBytes.byteLength + 0x7fff) & ~0x7fff;
+      state.romDataPtr = state.module._malloc(romSize);
+      const romData = new Uint8Array(state.module.HEAP8.buffer, state.romDataPtr, romSize);
+      romData.fill(0);
+      romData.set(state.romBytes);
+
+      state.emulator = state.module._emulator_new_simple(
+        state.romDataPtr,
+        romSize,
+        audioContext ? audioContext.sampleRate : 48000,
+        AUDIO_FRAMES,
+        2
+      );
+      if (state.emulator === 0) {
+        throw new Error("Invalid ROM");
+      }
+
+      state.joypad = state.module._joypad_new();
+      state.module._emulator_set_default_joypad_callback(state.emulator, state.joypad);
+      state.frameBuffer = new Uint8Array(
+        state.module.HEAP8.buffer,
+        state.module._get_frame_buffer_ptr(state.emulator),
+        state.module._get_frame_buffer_size(state.emulator)
+      );
+      state.audioBuffer = new Uint8Array(
+        state.module.HEAP8.buffer,
+        state.module._get_audio_buffer_ptr(state.emulator),
+        state.module._get_audio_buffer_capacity(state.emulator)
+      );
+      applyPalette();
+      syncInput();
+    };
+
+    const queueAudio = () => {
+      if (!audioContext || !state.audioReady) {
+        return;
+      }
+
+      const nowSec = audioContext.currentTime;
+      state.audioStartSec = Math.max(state.audioStartSec || nowSec + AUDIO_LATENCY_SEC, nowSec + AUDIO_LATENCY_SEC);
+
+      const buffer = audioContext.createBuffer(2, AUDIO_FRAMES, audioContext.sampleRate);
+      const left = buffer.getChannelData(0);
+      const right = buffer.getChannelData(1);
+      for (let index = 0; index < AUDIO_FRAMES; index += 1) {
+        left[index] = state.audioBuffer[index * 2] / 255;
+        right[index] = state.audioBuffer[index * 2 + 1] / 255;
+      }
+
+      const source = audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContext.destination);
+      source.start(state.audioStartSec);
+      state.audioStartSec += AUDIO_FRAMES / audioContext.sampleRate;
+    };
+
+    const frame = (startMs) => {
+      state.rafId = requestAnimationFrame(frame);
+      if (!state.emulator || state.paused) {
+        return;
+      }
+
+      const startSec = startMs / 1000;
+      const deltaTicks = Math.min(
+        Math.max(startSec - (state.lastRafSec || startSec), 0),
+        MAX_UPDATE_SEC
+      ) * CPU_TICKS_PER_SECOND;
+      const targetTicks = state.module._emulator_get_ticks_f64(state.emulator) + deltaTicks - state.leftoverTicks;
+
+      while (true) {
+        const event = state.module._emulator_run_until_f64(state.emulator, targetTicks);
+        if (event & EVENT_NEW_FRAME) {
+          imageData.data.set(state.frameBuffer);
+          context.putImageData(imageData, 0, 0);
+        }
+        if (event & EVENT_AUDIO_BUFFER_FULL) {
+          queueAudio();
+        }
+        if (event & EVENT_UNTIL_TICKS) {
+          break;
+        }
+      }
+
+      state.leftoverTicks = (state.module._emulator_get_ticks_f64(state.emulator) - targetTicks) | 0;
+      state.lastRafSec = startSec;
+    };
+
+    const setScale = (scale) => {
+      canvas.style.width = `${canvas.width * scale}px`;
+      canvas.style.height = `${canvas.height * scale}px`;
+    };
+
+    paletteSelect.addEventListener("change", applyPalette);
+
+    pauseButton.addEventListener("click", () => {
+      state.paused = !state.paused;
+      state.lastRafSec = 0;
+      state.leftoverTicks = 0;
+      state.audioStartSec = 0;
+      pauseButton.textContent = state.paused ? "Resume" : "Pause";
+      if (audioContext) {
+        if (state.paused) {
+          audioContext.suspend();
+        } else if (state.audioReady) {
+          audioContext.resume();
+        }
+      }
+    });
+
+    resetButton.addEventListener("click", () => {
+      state.paused = false;
+      pauseButton.textContent = "Pause";
+      state.audioStartSec = 0;
+      createEmulator();
+      if (audioContext && state.audioReady) {
+        audioContext.resume();
+      }
+    });
+
+    fullscreenButton.addEventListener("click", async () => {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await app.requestFullscreen();
+      }
+    });
+
+    document.querySelectorAll("button[data-scale]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setScale(Number(button.dataset.scale));
+      });
+    });
+
+    window.addEventListener("keydown", (event) => {
+      if (!boundKeys.has(event.code)) {
+        return;
+      }
+
+      event.preventDefault();
+      pressedKeys.add(event.code);
+      syncInput();
+      if (!state.audioReady && audioContext) {
+        state.audioReady = true;
+        audioContext.resume();
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (!boundKeys.has(event.code)) {
+        return;
+      }
+
+      event.preventDefault();
+      pressedKeys.delete(event.code);
+      syncInput();
+    });
+
+    window.addEventListener("blur", releaseInput);
+
+    (async () => {
+      state.module = await Binjgb();
+      const response = await fetch("gameboy.gb");
+      if (!response.ok) {
+        throw new Error("Unable to load gameboy.gb");
+      }
+
+      state.romBytes = new Uint8Array(await response.arrayBuffer());
+      createEmulator();
+      setScale(3);
+      state.rafId = requestAnimationFrame(frame);
+    })().catch((error) => {
+      console.error(error);
+      document.body.textContent = error.message;
+    });
+  </script>
+</body>
+</html>

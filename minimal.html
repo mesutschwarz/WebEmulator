@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binjgb</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #000;
+    }
+
+    canvas {
+      display: block;
+      width: 480px;
+      height: 432px;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="screen" width="160" height="144">No Canvas Support</canvas>
+  <script src="binjgb.js"></script>
+  <script>
+    "use strict";
+
+    const CPU_TICKS_PER_SECOND = 4194304;
+    const AUDIO_FRAMES = 4096;
+    const AUDIO_LATENCY_SEC = 0.1;
+    const MAX_UPDATE_SEC = 5 / 60;
+    const EVENT_NEW_FRAME = 1;
+    const EVENT_AUDIO_BUFFER_FULL = 2;
+    const EVENT_UNTIL_TICKS = 4;
+    const bindings = [
+      ["ArrowUp", "_set_joyp_up"],
+      ["ArrowDown", "_set_joyp_down"],
+      ["ArrowLeft", "_set_joyp_left"],
+      ["ArrowRight", "_set_joyp_right"],
+      ["KeyZ", "_set_joyp_B"],
+      ["KeyX", "_set_joyp_A"],
+      ["Enter", "_set_joyp_start"],
+      ["Tab", "_set_joyp_select"]
+    ];
+
+    const canvas = document.getElementById("screen");
+    const context = canvas.getContext("2d");
+    const imageData = context.createImageData(canvas.width, canvas.height);
+    const pressedKeys = new Set();
+    const boundKeys = new Set(bindings.map(([code]) => code));
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
+
+    async function main() {
+      const module = await Binjgb();
+      const response = await fetch("gameboy.gb");
+      if (!response.ok) {
+        throw new Error("Unable to load gameboy.gb");
+      }
+
+      const romBytes = new Uint8Array(await response.arrayBuffer());
+      const romSize = (romBytes.byteLength + 0x7fff) & ~0x7fff;
+      const romDataPtr = module._malloc(romSize);
+      const romData = new Uint8Array(module.HEAP8.buffer, romDataPtr, romSize);
+      romData.fill(0);
+      romData.set(romBytes);
+
+      const emulator = module._emulator_new_simple(
+        romDataPtr,
+        romSize,
+        audioContext ? audioContext.sampleRate : 48000,
+        AUDIO_FRAMES,
+        2
+      );
+      if (emulator === 0) {
+        throw new Error("Invalid ROM");
+      }
+
+      module._emulator_set_default_joypad_callback(emulator, module._joypad_new());
+
+      const frameBuffer = new Uint8Array(
+        module.HEAP8.buffer,
+        module._get_frame_buffer_ptr(emulator),
+        module._get_frame_buffer_size(emulator)
+      );
+      const audioBuffer = new Uint8Array(
+        module.HEAP8.buffer,
+        module._get_audio_buffer_ptr(emulator),
+        module._get_audio_buffer_capacity(emulator)
+      );
+
+      let audioReady = !audioContext;
+      let audioStartSec = 0;
+      let lastRafSec = 0;
+      let leftoverTicks = 0;
+
+      const syncInput = () => {
+        for (const [code, setter] of bindings) {
+          module[setter](emulator, pressedKeys.has(code));
+        }
+      };
+
+      window.addEventListener("keydown", (event) => {
+        if (!boundKeys.has(event.code)) {
+          return;
+        }
+
+        event.preventDefault();
+        pressedKeys.add(event.code);
+        syncInput();
+        if (!audioReady && audioContext) {
+          audioReady = true;
+          audioContext.resume();
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        if (!boundKeys.has(event.code)) {
+          return;
+        }
+
+        event.preventDefault();
+        pressedKeys.delete(event.code);
+        syncInput();
+      });
+
+      window.addEventListener("blur", () => {
+        pressedKeys.clear();
+        syncInput();
+      });
+
+      const frame = (startMs) => {
+        requestAnimationFrame(frame);
+
+        const startSec = startMs / 1000;
+        const deltaTicks = Math.min(
+          Math.max(startSec - (lastRafSec || startSec), 0),
+          MAX_UPDATE_SEC
+        ) * CPU_TICKS_PER_SECOND;
+        const targetTicks = module._emulator_get_ticks_f64(emulator) + deltaTicks - leftoverTicks;
+
+        while (true) {
+          const event = module._emulator_run_until_f64(emulator, targetTicks);
+          if (event & EVENT_NEW_FRAME) {
+            imageData.data.set(frameBuffer);
+            context.putImageData(imageData, 0, 0);
+          }
+          if (audioContext && audioReady && (event & EVENT_AUDIO_BUFFER_FULL)) {
+            const nowSec = audioContext.currentTime;
+            audioStartSec = Math.max(audioStartSec || nowSec + AUDIO_LATENCY_SEC, nowSec + AUDIO_LATENCY_SEC);
+
+            const buffer = audioContext.createBuffer(2, AUDIO_FRAMES, audioContext.sampleRate);
+            const left = buffer.getChannelData(0);
+            const right = buffer.getChannelData(1);
+            for (let index = 0; index < AUDIO_FRAMES; index += 1) {
+              left[index] = audioBuffer[index * 2] / 255;
+              right[index] = audioBuffer[index * 2 + 1] / 255;
+            }
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start(audioStartSec);
+            audioStartSec += AUDIO_FRAMES / audioContext.sampleRate;
+          }
+          if (event & EVENT_UNTIL_TICKS) {
+            break;
+          }
+        }
+
+        leftoverTicks = (module._emulator_get_ticks_f64(emulator) - targetTicks) | 0;
+        lastRafSec = startSec;
+      };
+
+      requestAnimationFrame(frame);
+    }
+
+    main().catch((error) => {
+      console.error(error);
+      document.body.textContent = error.message;
+    });
+  </script>
+</body>
+</html>
