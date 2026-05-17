@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="launcher.css" />
+  <title>binjgb / Lab</title>
+</head>
+<body class="theme-lab">
+  <script>
+    window.BINJGB_LAUNCHER_CONFIG = {
+      title: "binjgb / Lab",
+      subtitle: "Kitchen-sink reference page for exploring every useful control without changing the emulator binary.",
+      rom: "gameboy.gb",
+      storagePrefix: "binjgb:lab",
+      showTouchControls: true,
+      showAdvancedControls: true,
+      enableFastForward: true,
+      enableRewind: true,
+      enablePause: true,
+      enablePaletteSwitching: true,
+      enableSaveState: true,
+      enableLoadState: true,
+      enableFullscreen: true,
+      enableReset: true,
+      enableCurveChange: true,
+      autoLoadState: true,
+      cgbColorCurve: 2,
+      defaultPaletteIdx: 79,
+      palettes: Array.from({length: 84}, (_, index) => index),
+    };
+  </script>
+  <main class="app">
+    <section class="hero">
+      <div class="eyebrow">static launcher</div>
+      <h1>Lab</h1>
+      <p id="subtitleLabel"></p>
+    </section>
+
+    <section class="workspace">
+      <section class="screenFrame">
+        <div class="screenShell">
+          <canvas id="screen" width="160" height="144">No Canvas Support</canvas>
+          <div id="bootMessage" class="bootMessage">Booting emulator...</div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <section class="panelSection">
+          <h2 class="panelTitle">Live State</h2>
+          <div class="stats">
+            <div class="stat"><span>FPS</span><strong id="fpsLabel">60.0</strong></div>
+            <div class="stat"><span>Ticks</span><strong id="ticksLabel">0</strong></div>
+            <div class="stat"><span>Mode</span><strong id="modeLabel">running</strong></div>
+            <div class="stat"><span>Palette</span><strong id="paletteLabel">0</strong></div>
+          </div>
+        </section>
+
+        <section class="panelSection">
+          <h2 class="panelTitle">Controls</h2>
+          <div class="buttonRow">
+            <button data-action="pause">Pause</button>
+            <button data-action="rewind">Rewind</button>
+            <button data-action="ff">Fast Forward</button>
+            <button data-action="palette-prev">Palette -</button>
+            <button data-action="palette-next">Palette +</button>
+            <button data-action="save-state">Save State</button>
+            <button data-action="load-state">Load State</button>
+            <button data-action="reset">Reload ROM</button>
+            <button data-action="fullscreen">Fullscreen</button>
+          </div>
+        </section>
+
+        <section class="panelSection formGrid" data-feature="advanced">
+          <h2 class="panelTitle">Tuning</h2>
+          <div class="field">
+            <span class="label">Palette Bank</span>
+            <select id="paletteSelect"></select>
+          </div>
+          <div class="field">
+            <span class="label">Volume</span>
+            <input id="volumeSlider" type="range" min="0" max="1" step="0.01" value="0.5" />
+          </div>
+          <div class="field" data-feature="curve">
+            <span class="label">CGB Curve</span>
+            <select id="curveSelect">
+              <option value="0">Raw</option>
+              <option value="1">Sameboy</option>
+              <option value="2">Gambatte</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="panelSection" data-feature="advanced">
+          <h2 class="panelTitle">Rewind</h2>
+          <input id="rewindSlider" type="range" min="0" max="1" value="0" />
+        </section>
+
+        <section class="panelSection">
+          <h2 class="panelTitle">Info</h2>
+          <div class="hint">All useful knobs in one place for choosing a final launch style. Save status: <span id="stateLabel">live</span>.</div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="footerBar">
+      <div class="chips">
+        <span class="chip"><b>ROM</b> gameboy.gb</span>
+        <span class="chip"><b>Palette</b> full set</span>
+        <span class="chip"><b>Touch</b> enabled</span>
+        <span class="chip"><b>Curve</b> selectable</span>
+      </div>
+      <div class="chips">
+        <span class="chip">Reference build</span>
+      </div>
+    </section>
+  </main>
+
+  <section id="controller" class="touchController" data-feature="touch">
+    <div id="controller_dpad">
+      <div id="controller_left"></div>
+      <div id="controller_right"></div>
+      <div id="controller_up"></div>
+      <div id="controller_down"></div>
+    </div>
+    <div id="controller_select" class="capsuleBtn">Select</div>
+    <div id="controller_start" class="capsuleBtn">Start</div>
+    <div id="controller_b" class="roundBtn">B</div>
+    <div id="controller_a" class="roundBtn">A</div>
+  </section>
+
+  <script src="binjgb.js"></script>
+  <script src="launcher-core.js"></script>
+</body>
+</html>
